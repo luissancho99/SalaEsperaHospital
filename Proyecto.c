@@ -43,9 +43,11 @@ struct PatientData{
 
 // Variables globales
 struct pet enConsulta[N_DOCTORES];
-struct PatientData patientTable[N_PACIENTES];
 
-//Mutex
+struct PatientData patientTable[N_PACIENTES];
+
+
+//Mutex
 pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t free_doc = PTHREAD_COND_INITIALIZER;
 
@@ -108,7 +110,8 @@ int main(int argc, char **argv)	{
 	timer_create(CLOCK_REALTIME, NULL, &timer);
 	timer_settime(timer, 0, &itciclo, NULL);
 	
-	printf("Programa arrancado\n");
+	
+printf("Programa arrancado\n");
 
 	
 	crea_peticiones(); //Función que lanza peticiones a la cola
@@ -120,7 +123,7 @@ int main(int argc, char **argv)	{
 		//En cambio, si hay peticiones encoladas, solo lo intentamos una vez
 		mq_getattr(bufferpeticiones, &estado_cola);
 			if(estado_cola.mq_curmsgs == MAX_WAIT) fin=1; //Condición de fin
-		if(estado_cola.mq_curmsgs != 0){
+		if(estado_cola.mq_curmsgs == 0){
 			do{
 				res = mq_receive(colapeticiones, (char *)&peticion, sizeof(peticion), NULL);
 			}while(res==-1);
@@ -200,7 +203,8 @@ void *h_consulta(void *p){
 	
 	//Envia el DNI y duerme 5 segundos para simular la espera
 	mq_send(colaenviodni, peticion.dni, sizeof(int), 0);	
-	nanosleep(&sleeper, NULL);
+	
+nanosleep(&sleeper, NULL);
 	
 	//Busca un hueco vacío en la tabla
 	for(j=0 ; j<N_PACIENTES; j++)
@@ -282,13 +286,15 @@ void respuestas_servidor(){
 	char *cola_r_dni = "\coladni";
 	char *cola_e_medicina= "\colarecepcionmedicina";
 	struct mq_attr attr;
-	mqd_t colaservidor, coladni;	
+	mqd_t colaservidor, coladni;
+	
 	
 	//Variables
 	struct PatientData prescripcion;
 	int cont=0;
 	char medicines[10]={"Paracetamol", "Ibuprofeno", "Aspirina", "Omeprazol", "Amoxicilina", "Loratadina", "Aspirina", "Paracetamol", "Adrenalina", "Ibuprofeno"};
-	int maxtime[10]={10, 14, 3, 3, 5, 14, 7, 14, 10, 5};	int dni;
+	int maxtime[10]={10, 14, 3, 3, 5, 14, 7, 14, 10, 5};
+	int dni;
 
 
 		
