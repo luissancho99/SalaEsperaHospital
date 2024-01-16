@@ -43,11 +43,15 @@ struct PatientData{
 
 // Variables globales
 struct pet enConsulta[N_DOCTORES];
-struct PatientData patientTable[N_PACIENTES];
 
-//Mutex
+struct PatientData patientTable[N_PACIENTES];
+int newcall=0;
+
+
+//Mutex
 pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t free_doc = PTHREAD_COND_INITIALIZER;
+pthread_cond_t llamada_doc = PTHREAD_COND_INITIALIZER;
 
 
 //Funciones de arranque
@@ -63,10 +67,14 @@ int main(int argc, char **argv)	{
 	//Colas
 	char *cola_pet = "/cola_peticiones";
 	char *buffer_pet = "/buffer_peticiones";
-	struct mq_attr attr, estado_cola;
-	mqd_t colapeticiones, bufferpeticiones;
+	//También crearemos las colas de los hilos para asegurarnos de que se abren todas desde el comienzo
+	char *cola_dni = "/coladni";
+	char *cola_medicina= "/colarecepcionmedicina";
 	
-	//Señales
+	struct mq_attr attr, estado_cola;
+	mqd_t colapeticiones, bufferpeticiones, coladni, colaservidor;
+	
+	//SeÃ±ales
 	struct sigaction accion;
 	sigset_t mascara;
 	
@@ -84,7 +92,7 @@ int main(int argc, char **argv)	{
 	int res;
 	struct pet peticion;
 	
-	//Hilos simulación
+	//Hilos simulaciÃ³n
 	pthread_t creapeticiones, respuestaservidor;
 	
 
@@ -95,7 +103,16 @@ int main(int argc, char **argv)	{
 		colapeticiones   = mq_open(cola_pet, O_CREAT|O_RDONLY|O_NONBLOCK, S_IRWXU, &attr);
 		bufferpeticiones = mq_open(buffer_pet, O_CREAT|O_RDWR|O_NONBLOCK, S_IRWXU, &attr);
 		
-	// Máscara a SIGALRM para función
+		
+	//Abrimos las colas de la simulación
+	mq_unlink(cola_dni); mq_unlink(cola_medicina);
+		attr.mq_maxmsg = N_DOCTORES;
+		attr.mq_msgsize= sizeof(struct PatientData);
+	colaservidor = mq_open(cola_medicina, O_CREAT, S_IRWXU, &attr);
+		attr.mq_msgsize	= sizeof(int);
+	coladni = mq_open(cola_dni, O_CREAT, S_IRWXU, &attr);
+		
+	// MÃ¡scara a SIGALRM para funciÃ³n
 		accion.sa_sigaction = handler;
 		accion.sa_flags     = SA_SIGINFO;
 		sigemptyset(&accion.sa_mask);
@@ -110,91 +127,101 @@ int main(int argc, char **argv)	{
 	timer_create(CLOCK_REALTIME, NULL, &timer);
 	timer_settime(timer, 0, &itciclo, NULL);
 	
-	printf("Programa arrancado\n");
+	
+printf("Programa arrancado\n");
 
 	// Creamos los hilos que simulan ser pacientes del hospital y los doctores que prescriben medicamentos
 	pthread_create(&creapeticiones, NULL, crea_peticiones, NULL);
 	pthread_create(&respuestaservidor, NULL, respuestas_servidor, NULL);
 	
+	//Inicializamos datos
+	args_consulta = malloc(sizeof(struct argsConsulta));
+	
 	// Bucle: mientras no haya un error en la lectura ni queden demasiados mensajes pendientes
 	do{
-		//Leer peticiones. Si el buffer de cola está vacío (no hay solicitudes pendientes) podemos quedarnos esperando una petición.
+		//Leer peticiones. Si el buffer de cola estÃ¡ vacÃ­o (no hay solicitudes pendientes) podemos quedarnos esperando una peticiÃ³n.
 		//En cambio, si hay peticiones encoladas, solo lo intentamos una vez
 		mq_getattr(bufferpeticiones, &estado_cola);
 		
-		printf("\n --------------------------------------------- \n");
-		    printf("En el buffer hay %i peticiones\n", estado_cola.mq_curmsgs);
+		
+		    printf("En el buffer hay %d peticiones\n", estado_cola.mq_curmsgs);
 		    
-			if(estado_cola.mq_curmsgs == MAX_WAIT) fin=1; //Condición de fin
+			if(estado_cola.mq_curmsgs == MAX_WAIT) fin=1; //CondiciÃ³n de fin
 		if(estado_cola.mq_curmsgs == 0){
 			do{
-				res = mq_receive(colapeticiones, (char *)&peticion, sizeof(peticion), NULL);
+				res = mq_receive(colapeticiones, (char *)&peticion, sizeof(struct pet), NULL);
 			}while(res==-1);
 		}
 		else
-			res = mq_receive(colapeticiones, (char *)&peticion, sizeof(peticion), NULL);
+			res = mq_receive(colapeticiones, (char *)&peticion, sizeof(struct pet), NULL);
 			
-			printf("main: Se ha recibido la peticion del DNI %i. Tipo:%d. Urgencia: %i\n", peticion.dni, peticion.tipo, peticion.emergencia);
-			
+		printf("main: Se ha recibido la peticion del DNI %i. Tipo:%d. Urgencia: %i\n", peticion.dni, peticion.tipo, peticion.emergencia);
+		pthread_mutex_lock(&mut);
 		//Si recibimos peticion y no es urgente, la mandamos por el buffer
 		if(peticion.emergencia==0 && res!=-1)
-			mq_send(bufferpeticiones, (char *)&peticion, sizeof(peticion), 0);
+{
+			mq_send(bufferpeticiones, (char *)&peticion, sizeof(struct pet), 0);
+			printf("Se ha reenviado al buffer\n");
+		}
 		else if(peticion.emergencia==1 && peticion.tipo == CONSULTA && res!=-1){
-			//Comprobamos si hay un doctor libre que no esté atendiendo una emergencia
+			//Comprobamos si hay un doctor libre que no estÃ© atendiendo una emergencia
 			for(i=0; i<N_DOCTORES; i++){
-				if(enConsulta[i].emergencia == 0){ //En caso afirmativo, extraemos la información y la pasamos a la cola buffer con mayor prioridad
+				if(enConsulta[i].emergencia == 0){ //En caso afirmativo, extraemos la informaciÃ³n y la pasamos a la cola buffer con mayor prioridad
 					pthread_cancel(&p[i]);
-					mq_send(bufferpeticiones, &enConsulta[i], sizeof(peticion), 1);
-					printf("La emergencia sera tratada por el doctor %i\n", i);
+					mq_send(bufferpeticiones, &enConsulta[i], sizeof(struct pet), 1);
+					printf("La EMERGENCIA sera tratada por el doctor %i\n", i);
 					break;		
 				}
 			}
-			//Enviamos la petición urgente por la cola con prioridad 5. Será atendida inmediatamente
-			mq_send(bufferpeticiones, (char *)&peticion, sizeof(peticion), 5);
+			//Enviamos la peticiÃ³n urgente por la cola con prioridad 5. SerÃ¡ atendida inmediatamente
+			mq_send(bufferpeticiones, (char *)&peticion, sizeof(struct pet), 5);
 		}
 		
 		
-		//Una vez leídas las peticiones nuevas, comprobamos si podemos lanzar una nueva consulta
-		res = mq_receive(bufferpeticiones, (char *)&peticion, sizeof(peticion), &prior);
-		// Tipo de petición consulta
+		//Una vez leÃ­das las peticiones nuevas, comprobamos si podemos lanzar una nueva consulta
+		res = mq_receive(bufferpeticiones, (char *)&peticion, sizeof(struct pet), &prior);
+		// Tipo de peticiÃ³n consulta		
 		if(peticion.tipo == CONSULTA){
 			for(i=0; i<N_DOCTORES; i++){
 				if(enConsulta[i].dni == 0){ //Si no hay nadie en la consulta lanzamos el hilo y actualizamos datos globales
 					args_consulta->i=i;
 					args_consulta->peticion = peticion;
-					pthread_create(&p[i], NULL, h_consulta, (void *)args_consulta);
+					pthread_create(&p[i], NULL, h_consulta, args_consulta);
 					enConsulta[i] = peticion;
 					printf("Entra en consulta %i\n", i);
-				break;
+					break;
 				}
 				else if (i==4){ //Si no quedan consultas libres mandamos el mensaje de nuevo por el buffer
-					mq_send(bufferpeticiones, (char *)&peticion, sizeof(peticion), &prior);
+					mq_send(bufferpeticiones, (char *)&peticion, sizeof(struct pet), &prior);
 					printf("Todos los doctores estan ocupados y atendiendo una emergencia en este momento\n");
 				}
 				printf("Doctor %i atendiendo al paciente %i\n", i, enConsulta[i].dni);
 			}
 		}
-		
+	
 		
 		
 		else if(peticion.tipo == CARTILLA){
 		
-		printf("\n --------------------------------------------- \n");
+			printf("\n --------------------------------------------- \n");
 			printf("PRESCRIPCIONES PARA DNI %i\n", peticion.dni);
-		printf(" --------------------------------------------- \n");
-			pthread_mutex_lock(&mut);
+			printf(" --------------------------------------------- \n");
+			
 			for(i=0; i<N_PACIENTES; i++){ //Buscamos todas las medicinas prescritas al paciente
 				if(patientTable[i].dni == peticion.dni){
 					printf("Medicina: %s\n", patientTable[i].medicine);
 					printf("Expiracion: %d\n", patientTable[i].maxtime);
 				}
-			}			
-		printf("\n --------------------------------------------- \n");
-			pthread_mutex_unlock(&mut);
+			}
+			
+		printf(" He terminado de buscar\n");
+		printf(" --------------------------------------------- \n\n");
 		}		
 					
+		pthread_mutex_unlock(&mut);
 	}while(fin != 1);
 	
+	printf("main: He salido del bucle\n");
 		
 }
 
@@ -202,15 +229,16 @@ int main(int argc, char **argv)	{
 
 void *h_consulta(void *p){
 	struct argsConsulta *pointer = p;
+	struct PatientData prescripcion;
 	int i=pointer->i;
 	struct pet peticion=pointer->peticion;
 	
-	int j;
+	int j, res;
 
-	char *colaenvio = "\coladni";
-	char *colarecepcion = "\colarecepcionmedicina";
+	char *colaenvio = "/coladni";
+	char *colarecepcion = "/colarecepcionmedicina";
 	mqd_t cola_e_dni, cola_r_medicina;
-	
+					
 	struct timespec sleeper = {2, 0};
 	
 	// Apertura de colas
@@ -219,20 +247,32 @@ void *h_consulta(void *p){
 	
 	printf("hilo: Soy el hilo %i atendiendo a %i\n", i, peticion.dni);
 	//Envia el DNI y duerme 2 segundos para simular la espera
-	mq_send(cola_e_dni, peticion.dni, sizeof(int), 0);	
-	nanosleep(&sleeper, NULL);
-	printf("hilo: He enviado el dni al servidor\n");
+	res = mq_send(cola_e_dni, &peticion.dni, sizeof(int), NULL);	
+	printf("hilo %i: He enviado el dni %i al servidor\n", i, peticion.dni);
+	printf("pero no se si satisfactoriamente... %i\n", res);	
+	
+	
+	//nanosleep(&sleeper,NULL);
 	pthread_mutex_lock(&mut);
-	//Busca un hueco vacío en la tabla
+	newcall=1; pthread_cond_signal(&llamada_doc);
+	pthread_mutex_unlock(&mut);
+	
+	//Busca un hueco vacÃ­o en la tabla	
+	pthread_mutex_lock(&mut);
 	for(j=0 ; j<N_PACIENTES; j++)
 		if (patientTable[j].dni == 0)
 			break;
 	
-	//Guarda la prescripción médica en la tabla global
-	mq_receive(cola_r_medicina, (char *)&patientTable[j], sizeof(struct PatientData), NULL);
+	pthread_mutex_unlock(&mut);
+	//Guarda la prescripciÃ³n mÃ©dica en la tabla global
+	printf("paciente esperando receta\n");
+	mq_receive(cola_r_medicina, (char *)&prescripcion, sizeof(struct PatientData), NULL);
 	
 	printf("El paciente %i ha salido de consulta. Se le ha recetado %s durante %i dias\n", patientTable[j].dni, patientTable[j].medicine, patientTable[j].maxtime);
-	//Indica que ha terminado la consulta en los datos globales
+	
+	pthread_mutex_lock(&mut);
+	//Indica que ha terminado la consulta en los datos globales y guarda la prescripcion
+	patientTable[j] = prescripcion;
 	enConsulta[i].dni = 0;
 	pthread_mutex_unlock(&mut);
 	
@@ -250,9 +290,9 @@ void handler(){
 	
 	pthread_mutex_lock(&mut);
 	
-	printf("\nBorrando recetas expiradas...\n");
+	printf("\nhandler: Borrando recetas expiradas...\n");
 	for(i=0; i<N_PACIENTES; i++){
-		if(patientTable[i].dni != 0){ //Comprobamos registro válido
+		if(patientTable[i].dni != 0){ //Comprobamos registro vÃ¡lido
 			elapsedTime = currentTime.tv_sec - patientTable[i].timestamp.tv_sec;
 			if (elapsedTime > patientTable[i].maxtime){
 				printf("RECETA %s DEL PACIENTE %i EXPIRADA\n", patientTable[i].medicine, patientTable[i].dni);
@@ -273,7 +313,7 @@ void crea_peticiones(){
 	struct timespec delay = {0, 50*100*M};
 	int cont=1;
 	
-	//Abrimos cola por donde se mandarán las peticiones
+	//Abrimos cola por donde se mandarÃ¡n las peticiones
 	char *cola_pet = "/cola_peticiones";
 	mqd_t colapeticiones;
 	colapeticiones = mq_open(cola_pet, O_WRONLY, 0, NULL);
@@ -292,56 +332,55 @@ void crea_peticiones(){
 			
 	   	printf("Se crea la peticion %i del usuario %i\n", cont, peticiones.dni);
 		
-		mq_send(colapeticiones, (char *)&peticiones, sizeof(peticiones), NULL);
+		mq_send(colapeticiones, (char *)&peticiones, sizeof(struct pet), NULL);
 		cont++;		
 	}	
 	
 }
 
-	
+
+	
 
 void respuestas_servidor(){
 	//Colas
-	char *cola_r_dni = "\coladni";
-	char *cola_e_medicina= "\colarecepcionmedicina";
-	struct mq_attr attr;
-	mqd_t colaservidor, coladni;	
+	char *cola_r_dni = "/coladni";
+	char *cola_e_medicina= "/colarecepcionmedicina";
+	mqd_t colaservidor, coladni;
+	
 	
 	//Variables
 	struct PatientData prescripcion;
 	int cont=0;
-	char medicines[10]={"Paracetamol", "Ibuprofeno", "Aspirina", "Omeprazol", "Amoxicilina", "Loratadina", "Aspirina", "Paracetamol", "Adrenalina", "Ibuprofeno"};
+	char *medicines[10]={"Paracetamol", "Ibuprofeno", "Aspirina", "Omeprazol", "Amoxicilina", "Loratadina", "Aspirina", "Paracetamol", "Adrenalina", "Ibuprofeno"};
 	int maxtime[10]={10, 14, 3, 3, 5, 14, 7, 14, 10, 5};
 	int dni;
 
 
-		
-	//Abrimos las colas
-	mq_unlink(cola_r_dni); mq_unlink(cola_e_medicina);
-		attr.mq_maxmsg = N_DOCTORES;
-		attr.mq_msgsize= sizeof(struct PatientData);
-	colaservidor = mq_open(cola_e_medicina, O_CREAT|O_WRONLY, S_IRWXU, &attr);
-	
-		attr.mq_msgsize	= sizeof(int);
-	coladni = mq_open(cola_r_dni, O_CREAT|O_RDONLY, S_IRWXU, &attr);
+	//Abrimos las colas (ya creadass en main)
+	colaservidor = mq_open(cola_e_medicina, O_WRONLY, 0, NULL);
+	coladni = mq_open(cola_r_dni, O_RDONLY, 0, NULL);
 	
 	
 	printf("Hilo de doctores arrancado\n");
 	
 	while(1){
+		pthread_mutex_lock(&mut);
+		while(newcall==0)		
+pthread_cond_wait(&llamada_doc,&mut);
+		newcall=0;
+		pthread_mutex_unlock(&mut);
 		mq_receive(coladni, (char *)&dni, sizeof(int), NULL);
-		printf("doctor: Estoy pensando que recetar a %i\n", dni);
-		pthread_mutex_lock(&mut);
+		
+	printf("doctor: Estoy pensando que recetar a %i\n", dni);
 		prescripcion.dni = dni;
 		prescripcion.maxtime = maxtime[cont%10];
 		strcpy(prescripcion.medicine, medicines[cont%10]);
 		clock_gettime(CLOCK_REALTIME, &prescripcion.timestamp);
 		
-		mq_send(colaservidor, (char *)&prescripcion, sizeof(prescripcion), NULL);
+		mq_send(colaservidor, (char *)&prescripcion, sizeof(struct PatientData), NULL);
 		printf("servidor: Se ha mandado la prescripcion a %i\n", dni);
 		
 		cont++;
-		pthread_mutex_unlock(&mut);
 	}
 	
 }
@@ -352,9 +391,7 @@ void respuestas_servidor(){
 
 #/** PhEDIT attribute block
 #-11:16777215
-#0:5139:default:-3:-3:0
-#5139:5150:default:-3:-3:4
-#5150:6636:default:-3:-3:0
-#6636:6704:default:-3:-3:4
-#6704:10390:default:-3:-3:0
-#**  PhEDIT attribute block ends (-0000222)**/
+#0:4434:default:-3:-3:0
+#4434:4454:Verdana12:-3:-3:0
+#4454:11571:default:-3:-3:0
+#**  PhEDIT attribute block ends (-0000170)**/
